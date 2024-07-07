@@ -1,4 +1,3 @@
 aiogram
 python-docx
-google-cloud-retry
-google-cloud-exceptions
+google-generativeai
