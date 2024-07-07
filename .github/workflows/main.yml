@@ -30,4 +30,4 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           GENAI_API_KEY: ${{ secrets.GENAI_API_KEY }}
         run: |
-          python bot.py
+          python dip.py
