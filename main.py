@@ -1,17 +1,23 @@
-import asyncio
 import logging
 import os
 from aiogram import Bot, Dispatcher, types
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.filters import Command
-import aiohttp
+from aiagram.utils.token import validate_token
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '7414905635:AAHBlef17Zjo0x13nrTCV0X410fiyY1TOKQ')
+
+logger.debug(f"Token being used: {TELEGRAM_TOKEN[:4]}...{TELEGRAM_TOKEN[-4:]}")
+
+try:
+    validate_token(TELEGRAM_TOKEN)
+    logger.info("Token validation passed")
+except Exception as e:
+    logger.error(f"Token validation failed: {str(e)}")
+    raise
+
 bot = Bot(token=TELEGRAM_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
