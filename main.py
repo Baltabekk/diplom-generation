@@ -11,7 +11,7 @@ import aiohttp
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TELEGRAM_TOKEN = os.getenv('7414905635:AAHBlef17Zjo0x13nrTCV0X410fiyY1TOKQ')
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', '7414905635:AAHBlef17Zjo0x13nrTCV0X410fiyY1TOKQ')
 bot = Bot(token=TELEGRAM_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
