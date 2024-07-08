@@ -20,5 +20,5 @@ jobs:
         pip install -r requirements.txt
     - name: Run main server
       env:
-        TELEGRAM_TOKEN: ${{ secrets.7414905635:AAHBlef17Zjo0x13nrTCV0X410fiyY1TOKQ }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
       run: python main.py
