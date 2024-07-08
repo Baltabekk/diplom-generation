@@ -18,6 +18,18 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
+    - name: Check environment variable
+      run: |
+        if [ -n "$TELEGRAM_TOKEN" ]; then
+          echo "TELEGRAM_TOKEN is set"
+          echo "First 4 characters: ${TELEGRAM_TOKEN:0:4}"
+          echo "Last 4 characters: ${TELEGRAM_TOKEN: -4}"
+        else
+          echo "TELEGRAM_TOKEN is not set"
+          exit 1
+        fi
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
     - name: Run main server
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
