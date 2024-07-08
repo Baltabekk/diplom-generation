@@ -8,29 +8,25 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.filters import Command
 import aiohttp
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# Инициализация бота и диспетчера
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+TELEGRAM_TOKEN = os.getenv('7414905635:AAHBlef17Zjo0x13nrTCV0X410fiyY1TOKQ')
 bot = Bot(token=TELEGRAM_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Определение состояний
 class GenerationStates(StatesGroup):
     WAITING_FOR_GENERATOR = State()
 
-# Список URL генераторов
 GENERATOR_URLS = [
-    'http://generator1:8080/generate',
-    'http://generator2:8080/generate',
-    'http://generator3:8080/generate',
-    'http://generator4:8080/generate',
-    'http://generator5:8080/generate',
+    'https://generator1.herokuapp.com/generate',
+    'https://generator2.herokuapp.com/generate',
+    'https://generator3.herokuapp.com/generate',
+    'https://generator4.herokuapp.com/generate',
+    'https://generator5.herokuapp.com/generate',
 ]
 
-# Очередь запросов
 request_queue = asyncio.Queue()
 
 @dp.message(Command("start"))
