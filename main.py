@@ -5,19 +5,20 @@ import time
 import json
 import os
 from datetime import datetime, timedelta
-
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.enums import ParseMode
+from aiogram.filters import Command
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.filters.command import Command
-from aiogram.types import FSInputFile, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import FSInputFile, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from docx import Document
 from docx.shared import Pt
 from docx.enum.style import WD_STYLE_TYPE
 import google.generativeai as genai
 from google.api_core import retry, exceptions
 from cachetools import TTLCache
+
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Установка констант и ключей API
 ADMIN_ID = 1419048544
 DAILY_LIMIT = 3
-TELEGRAM_TOKEN = '6790686493:AAGYsdk5DVLrmccPT87Li49P1RBEik60-48'
+TELEGRAM_TOKEN = '7414905635:AAHBlef17Zjo0x13nrTCV0X410fiyY1TOKQ'
 GENAI_API_KEYS = [
     'AIzaSyCtrFiYRihVUm_L58vS-c_8MEyZX7VLLv0',
     'AIzaSyDr_zy732Xybb1xZ1LEpEH31h6PjgnWInQ',
@@ -55,7 +56,8 @@ cache = TTLCache(maxsize=100, ttl=3600)
 # Определение состояний
 class GenerationStates(StatesGroup):
     SELECT_DOCUMENT_SIZE = State()
-    GENERATING_SECTIONS = State()
+    WAITING_FOR_TOPIC = State()
+    GENERATING_CONTENT = State()
     LEAVE_FEEDBACK = State()
     SEND_MESSAGE_TO_ALL = State()
 
@@ -94,9 +96,28 @@ def get_user_data(user_id):
             'start_date': str(datetime.now()),
             'username': None,
             'feedback': [],
-            'requested_topic': None
+            'requested_topic': None,
+            'referral_link': f"https://t.me/gendiplom_bot?start={user_id}",
+            'referred_by': None,
+            'referral_count': 0,
+            'bonus_requests': 0
         }
+    elif 'referral_link' not in user_data[user_id]:
+        user_data[user_id]['referral_link'] = f"https://t.me/gendiplom_bot?start={user_id}"
     return user_data[user_id]
+
+def process_referral(new_user_id, referrer_id):
+    new_user_data = get_user_data(new_user_id)
+    if new_user_data['referred_by']:
+        return False, "Вы уже были приглашены другим пользователем."
+    
+    referrer_data = get_user_data(referrer_id)
+    new_user_data['referred_by'] = referrer_id
+    referrer_data['referral_count'] += 1
+    referrer_data['bonus_requests'] += 2  # Увеличенный бонус для пригласившего
+    new_user_data['bonus_requests'] += 3  # Увеличенный бонус для нового пользователя
+    save_data(user_data, USER_DATA_FILE)
+    return True, "Вы успешно присоединились по реферальной ссылке! Вы получили 3 дополнительных запроса."
 
 def check_and_update_quota(user_id, is_document_generation=False):
     user_id = str(user_id)
@@ -110,23 +131,28 @@ def check_and_update_quota(user_id, is_document_generation=False):
         data['requests'] = 0
         data['last_reset'] = str(now)
 
-    if is_document_generation and data['requests'] >= DAILY_LIMIT:
+    total_requests = DAILY_LIMIT + data['bonus_requests']
+
+    if is_document_generation and data['requests'] >= total_requests:
         next_reset = last_reset + timedelta(days=1)
         return False, f"Достигнут дневной лимит. Следующее обновление: {next_reset.strftime('%Y-%m-%d %H:%M:%S')}."
 
     if is_document_generation:
         data['requests'] += 1
-        remaining = DAILY_LIMIT - data['requests']
+        if data['requests'] > DAILY_LIMIT and data['bonus_requests'] > 0:
+            data['bonus_requests'] -= 1
+        remaining = total_requests - data['requests']
         save_data(user_data, USER_DATA_FILE)
         return True, f"Запрос принят. Осталось запросов сегодня: {remaining}."
     
-    return True, f"Осталось запросов сегодня: {DAILY_LIMIT - data['requests']}."
+    return True, f"Осталось запросов сегодня: {total_requests - data['requests']}."
 
 def get_remaining_requests(user_id):
     data = get_user_data(str(user_id))
     if data['is_admin']:
         return "Неограниченно (админ)"
-    remaining = DAILY_LIMIT - data['requests']
+    total_requests = DAILY_LIMIT + data['bonus_requests']
+    remaining = total_requests - data['requests']
     return str(remaining)
 
 def get_random_api_key():
@@ -138,84 +164,113 @@ def initialize_model(api_key):
 
 current_model = initialize_model(get_random_api_key())
 
-@dp.message(Command("start"))
-async def send_welcome(message: types.Message):
-    user_data = get_user_data(message.from_user.id)
-    user_data['username'] = message.from_user.username
-    logger.info(f"Пользователь {message.from_user.id} начал взаимодействие")
-    
-    markup = ReplyKeyboardMarkup(
+# Функция для создания главной клавиатуры
+def get_main_menu_keyboard():
+    return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="/help"), KeyboardButton(text="/menu")]
+            [KeyboardButton(text="Создать дипломную работу")],
+            [KeyboardButton(text="Оставить отзыв"), KeyboardButton(text="Посмотреть отзывы")],
+            [KeyboardButton(text="FAQ"), KeyboardButton(text="О нас")],
+            [KeyboardButton(text="Моя реферальная ссылка")]
         ],
-        resize_keyboard=True,
-        one_time_keyboard=True
+        resize_keyboard=True
     )
+
+@dp.message(Command("start"))
+async def start_command(message: types.Message):
+    user_id = message.from_user.id
+    user_data = get_user_data(user_id)
     
-    await message.reply("Привет! Я бот, который поможет вам создать дипломную работу. Напишите /help для списка команд.", reply_markup=markup)
+    # Проверка на реферальную ссылку
+    args = message.get_url()
+    if args:
+        referrer_id = args
+        success, referral_message = await process_referral(user_id, referrer_id)
+        if success:
+            await message.reply(referral_message)
+    
+    welcome_text = f"Привет, {message.from_user.first_name}!\nДобро пожаловать в наш бот."
+    await message.reply(welcome_text, reply_markup=get_main_menu_keyboard())
+
+async def process_referral(new_user_id, referrer_id):
+    new_user_data = get_user_data(new_user_id)
+    if new_user_data['referred_by']:
+        return False, "Вы уже были приглашены другим пользователем."
+    
+    referrer_data = get_user_data(referrer_id)
+    if str(new_user_id) == str(referrer_id):
+        return False, "Вы не можете использовать свою собственную реферальную ссылку."
+    
+    new_user_data['referred_by'] = referrer_id
+    referrer_data['referral_count'] += 1
+    referrer_data['bonus_requests'] += 2  # Увеличенный бонус для пригласившего
+    new_user_data['bonus_requests'] += 3  # Увеличенный бонус для нового пользователя
+    save_data(user_data, USER_DATA_FILE)
+    
+    # Отправка уведомления пригласившему пользователю
+    try:
+        await bot.send_message(int(referrer_id), f"Поздравляем! Вы пригласили нового пользователя и получили 2 дополнительных запроса. Ваш текущий бонус: {referrer_data['bonus_requests']} запросов.")
+    except Exception as e:
+        logger.error(f"Не удалось отправить уведомление пользователю {referrer_id}: {str(e)}")
+    
+    return True, "Вы успешно присоединились по реферальной ссылке! Вы получили 3 дополнительных запроса."
+
 
 @dp.message(Command("help"))
 async def send_help(message: types.Message):
     logger.info(f"Пользователь {message.from_user.id} запросил помощь")
     help_text = (
         "Доступные команды:\n"
-        "/start - Начать взаимодействие\n"
+        "/start - Показать главное меню\n"
         "/generate - Создать содержание и текст\n"
-        "/quota - Лимиты\n"
+        "/quota - Проверить оставшиеся запросы\n"
         "/leave_feedback - Оставить отзыв\n"
         "/view_feedback - Посмотреть отзывы\n"
         "/contact_admins - Связаться с админами\n"
-        "/admin_menu - Меню администратора"
+        "/admin_menu - Меню администратора (только для админов)\n"
+        "/faq - Часто задаваемые вопросы\n"
+        "/about_us - О нашей компании\n"
+        "/my_referral - Ваша реферальная ссылка\n\n"
+        "Вы также можете использовать кнопки в главном меню для доступа к этим функциям."
     )
-    await message.reply(help_text)
+    await message.reply(help_text, reply_markup=get_main_menu_keyboard())
 
 @dp.message(Command("menu"))
 async def send_menu(message: types.Message):
-    markup = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="/generate")],
-            [KeyboardButton(text="/leave_feedback"), KeyboardButton(text="/view_feedback")]
-        ],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-    await message.reply("Выберите команду:", reply_markup=markup)
-
-async def generate_content_with_cache(prompt):
-    global current_model
-    if prompt in cache:
-        return cache[prompt]
-
-    max_retries = len(GENAI_API_KEYS)
-    for attempt in range(max_retries):
-        try:
-            response = await asyncio.to_thread(custom_retry(current_model.generate_content), prompt)
-            content = response.text.strip()
-            cache[prompt] = content
-            return content
-        except exceptions.ResourceExhausted:
-            logger.warning(f"API ключ исчерпан. Переключение на следующий ключ. Попытка {attempt + 1} из {max_retries}")
-            current_model = initialize_model(get_random_api_key())
-        except Exception as e:
-            logger.error(f"Ошибка при генерации контента: {str(e)}", exc_info=True)
-            raise Exception("Все API ключи исчерпаны. Невозможно сгенерировать контент.")
+    await message.reply("Главное меню:", reply_markup=get_main_menu_keyboard())
 
 @dp.message(Command("generate"))
+@dp.message(F.text == "Создать дипломную работу")
 async def generate_command(message: types.Message, state: FSMContext):
     markup = ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="40 страниц")],
-            [KeyboardButton(text="60 страниц")],
-            [KeyboardButton(text="100 страниц")]
+            [KeyboardButton(text="40 страниц"), KeyboardButton(text="60 страниц"), KeyboardButton(text="100 страниц")],
+            [KeyboardButton(text="Отменить генерацию")],
+            [KeyboardButton(text="Главное меню")]
         ],
         resize_keyboard=True,
         one_time_keyboard=True
     )
-    await message.reply("Выберите размер документа:", reply_markup=markup)
+    await message.reply("Выберите размер документа или отмените генерацию:", reply_markup=markup)
     await state.set_state(GenerationStates.SELECT_DOCUMENT_SIZE)
+
+@dp.message(GenerationStates.SELECT_DOCUMENT_SIZE, F.text == "Отменить генерацию")
+async def cancel_generation(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.reply("Генерация отменена.", reply_markup=get_main_menu_keyboard())
+
+@dp.message(F.text == "Главное меню")
+async def main_menu(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.reply("Вы вернулись в главное меню.", reply_markup=get_main_menu_keyboard())
 
 @dp.message(GenerationStates.SELECT_DOCUMENT_SIZE)
 async def process_document_size(message: types.Message, state: FSMContext):
+    if message.text == "Отменить генерацию":
+        await state.clear()
+        await message.reply("Генерация отменена.", reply_markup=get_main_menu_keyboard())
+        return
+    
     size = message.text.lower()
     word_count = 0
     
@@ -231,12 +286,70 @@ async def process_document_size(message: types.Message, state: FSMContext):
 
     await state.update_data(word_count=word_count)
     await message.reply("Отлично! Теперь введите тему вашей дипломной работы.")
-    await state.set_state(GenerationStates.GENERATING_SECTIONS)
+    await state.set_state(GenerationStates.WAITING_FOR_TOPIC)
 
-@dp.message(GenerationStates.GENERATING_SECTIONS)
+@dp.message(GenerationStates.WAITING_FOR_TOPIC)
 async def receive_topic(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
+    if message.text == "Отменить генерацию":
+        await state.clear()
+        await message.reply("Генерация отменена.", reply_markup=get_main_menu_keyboard())
+        return
+    
     topic = message.text.strip()
+    await state.update_data(topic=topic)
+    await message.reply(f"Тема принята: {topic}\nТеперь я начну генерацию содержания.")
+    await state.set_state(GenerationStates.GENERATING_CONTENT)
+    await generate_content(message, state)
+
+@dp.message(GenerationStates.GENERATING_CONTENT)
+async def ignore_messages_during_generation(message: types.Message):
+    await message.reply("Пожалуйста, подождите. Идет генерация содержания. Вы получите уведомление, когда документ будет готов.")
+
+@dp.message(F.text == "Моя реферальная ссылка")
+async def my_referral(message: types.Message):
+    user_id = str(message.from_user.id)
+    user_data = get_user_data(user_id)
+    referral_link = f"https://t.me/gendiplom_bot?start={user_id}"
+    referral_count = user_data['referral_count']
+    bonus_requests = user_data['bonus_requests']
+    
+    response = (
+        f"Ваша реферальная ссылка: {referral_link}\n\n"
+        f"Количество приглашенных пользователей: {referral_count}\n"
+        f"Ваш текущий бонус: {bonus_requests} дополнительных запросов\n\n"
+        "Отправьте эту ссылку друзьям. За каждого нового пользователя вы получите 2 дополнительных запроса, а ваш друг - 3 запроса!"
+    )
+    
+    await message.reply(response, reply_markup=get_main_menu_keyboard())
+
+
+async def generate_content_with_cache(prompt):
+    if prompt in cache:
+        return cache[prompt]
+    
+    try:
+        response = await asyncio.to_thread(current_model.generate_content, prompt)
+        content = response.text
+        cache[prompt] = content
+        return content
+    except Exception as e:
+        logger.error(f"Error generating content: {str(e)}")
+        raise
+
+async def generate_section(topic, section, word_count=500):
+    if section == "Введение":
+        prompt = f"Напишите подробное введение (около {word_count} слов) для дипломной работы на тему '{topic}'. Включите актуальность темы, цели и задачи исследования."
+    elif section == "Заключение":
+        prompt = f"Напишите подробное заключение (около {word_count} слов) для дипломной работы на тему '{topic}'. Подведите итоги исследования, сформулируйте основные выводы."
+    else:
+        prompt = f"Напишите подробный текст (около {word_count} слов) для раздела '{section}' дипломной работы на тему '{topic}'. Включите теоретическую базу, анализ и практические аспекты."
+    
+    return section, await generate_content_with_cache(prompt)
+
+async def generate_content(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    data = await state.get_data()
+    topic = data['topic']
     logger.info(f"Пользователь {user_id} указал тему: {topic}")
     
     user_data = get_user_data(user_id)
@@ -244,7 +357,7 @@ async def receive_topic(message: types.Message, state: FSMContext):
     
     can_proceed, quota_message = check_and_update_quota(user_id, is_document_generation=True)
     if not can_proceed:
-        await message.reply(quota_message)
+        await message.reply(quota_message, reply_markup=get_main_menu_keyboard())
         return
     
     await message.reply(f"{quota_message}\nГенерация содержания...")
@@ -256,25 +369,15 @@ async def receive_topic(message: types.Message, state: FSMContext):
         await message.reply(f"Содержание:\n{content}")
         
         sections = ["Введение"] + [section.strip() for section in content.split('\n') if section.strip()] + ["Заключение"]
-        await state.update_data(topic=topic, sections=sections)
+        await state.update_data(sections=sections)
         
         status_message = await message.reply("Начинаю генерацию документа. Это займет некоторое время.\nПрогресс: 0%")
         
-        word_count = (await state.get_data()).get('word_count', 500)
+        word_count = data.get('word_count', 500)
         await generate_sections(message, state, status_message, word_count)
     except Exception as e:
         logger.error(f"Ошибка при генерации содержания: {str(e)}", exc_info=True)
-        await message.reply("Произошла ошибка при генерации содержания. Пожалуйста, попробуйте еще раз или обратитесь к администратору.")
-
-async def generate_section(topic, section, word_count=500):
-    if section == "Введение":
-        prompt = f"Напишите подробное введение (около {word_count} слов) для дипломной работы на тему '{topic}'. Включите актуальность темы, цели и задачи исследования."
-    elif section == "Заключение":
-        prompt = f"Напишите подробное заключение (около {word_count} слов) для дипломной работы на тему '{topic}'. Подведите итоги исследования, сформулируйте основные выводы."
-    else:
-        prompt = f"Напишите подробный текст (около {word_count} слов) для раздела '{section}' дипломной работы на тему '{topic}'. Включите теоретическую базу, анализ и практические аспекты."
-    
-    return section, await generate_content_with_cache(prompt)
+        await message.reply("Произошла ошибка при генерации содержания. Пожалуйста, попробуйте еще раз или обратитесь к администратору.", reply_markup=get_main_menu_keyboard())
 
 async def generate_sections(message: types.Message, state: FSMContext, status_message: types.Message, word_count=500):
     data = await state.get_data()
@@ -294,13 +397,6 @@ async def generate_sections(message: types.Message, state: FSMContext, status_me
             await message.reply(f"Произошла ошибка при генерации раздела '{section}'. Пропускаю этот раздел.")
 
     await state.update_data(results=results)
-    
-    user_id = message.from_user.id
-    can_proceed, quota_message = check_and_update_quota(user_id, is_document_generation=True)
-    if not can_proceed:
-        await message.reply(quota_message)
-        return
-
     await finalize_document(message, state, status_message)
 
 async def update_progress(status_message: types.Message, start_time: float, completed_sections: int, total_sections: int):
@@ -312,9 +408,11 @@ async def update_progress(status_message: types.Message, start_time: float, comp
 async def check_quota(message: types.Message):
     user_id = message.from_user.id
     remaining = get_remaining_requests(user_id)
-    await message.reply(f"Оставшиеся запросы на сегодня: {remaining}")
+    await message.reply(f"Оставшиеся запросы на сегодня: {remaining}", reply_markup=get_main_menu_keyboard())
 
 @dp.message(Command("leave_feedback"))
+
+@dp.message(F.text == "Оставить отзыв")
 async def leave_feedback(message: types.Message, state: FSMContext):
     await message.reply("Пожалуйста, напишите ваш отзыв.")
     await state.set_state(GenerationStates.LEAVE_FEEDBACK)
@@ -327,53 +425,63 @@ async def process_feedback(message: types.Message, state: FSMContext):
     user_data[user_id]['feedback'].append(feedback)
     save_data(feedback_storage, FEEDBACK_FILE)
     save_data(user_data, USER_DATA_FILE)
-    await message.reply("Ваш отзыв был успешно оставлен.")
+    await message.reply("Спасибо за ваш отзыв! Он был успешно сохранен.", reply_markup=get_main_menu_keyboard())
     await state.clear()
 
 @dp.message(Command("view_feedback"))
+@dp.message(F.text == "Посмотреть отзывы")
 async def view_feedback(message: types.Message):
     if not feedback_storage:
-        await message.reply("Отзывов пока нет.")
+        await message.reply("Отзывов пока нет.", reply_markup=get_main_menu_keyboard())
     else:
-        feedback_list = "\n".join(feedback_storage)
-        await message.reply(f"Отзывы:\n{feedback_list}")
+        feedback_list = "\n\n".join([f"Отзыв {i+1}: {feedback}" for i, feedback in enumerate(feedback_storage[-5:])])
+        await message.reply(f"Последние 5 отзывов:\n\n{feedback_list}", reply_markup=get_main_menu_keyboard())
 
 @dp.message(Command("contact_admins"))
 async def contact_admins(message: types.Message):
-    await message.reply("Напишите ваше сообщение для администраторов.")
+    await message.reply("Для связи с администраторами, пожалуйста, напишите на email: admin@example.com", reply_markup=get_main_menu_keyboard())
 
 @dp.message(Command("admin_menu"))
 async def admin_menu(message: types.Message):
     if str(message.from_user.id) != str(ADMIN_ID):
-        await message.reply("У вас нет прав для доступа к этому меню.")
+        await message.reply("У вас нет прав для доступа к этому меню.", reply_markup=get_main_menu_keyboard())
         return
 
-    markup = ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="/view_participants")],
-            [KeyboardButton(text="/view_feedback")],
-            [KeyboardButton(text="/send_message_to_all")]
-        ],
-        resize_keyboard=True
-    )
+    markup = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Просмотр участников", callback_data="view_participants")],
+        [InlineKeyboardButton(text="Просмотр отзывов", callback_data="view_all_feedback")],
+        [InlineKeyboardButton(text="Отправить сообщение всем", callback_data="send_message_to_all")]
+    ])
     await message.reply("Меню администратора:", reply_markup=markup)
 
-@dp.message(Command("view_participants"))
-async def view_participants(message: types.Message):
-    if str(message.from_user.id) != str(ADMIN_ID):
-        await message.reply("У вас нет прав для выполнения этой команды.")
+@dp.callback_query(F.data == "view_participants")
+async def view_participants(callback_query: types.CallbackQuery):
+    if str(callback_query.from_user.id) != str(ADMIN_ID):
+        await callback_query.answer("У вас нет прав для выполнения этой команды.")
         return
     
     participants = "\n".join([f"ID: {user_id}, Username: {data.get('username', 'Не указан')}" for user_id, data in user_data.items()])
-    await message.reply(f"Список участников:\n{participants}")
+    await callback_query.message.reply(f"Список участников:\n{participants}")
 
-@dp.message(Command("send_message_to_all"))
-async def send_message_to_all(message: types.Message, state: FSMContext):
-    if str(message.from_user.id) != str(ADMIN_ID):
-        await message.reply("У вас нет прав для выполнения этой команды.")
+@dp.callback_query(F.data == "view_all_feedback")
+async def view_all_feedback(callback_query: types.CallbackQuery):
+    if str(callback_query.from_user.id) != str(ADMIN_ID):
+        await callback_query.answer("У вас нет прав для выполнения этой команды.")
         return
     
-    await message.reply("Введите сообщение для всех пользователей.")
+    if not feedback_storage:
+        await callback_query.message.reply("Отзывов пока нет.")
+    else:
+        feedback_list = "\n\n".join([f"Отзыв {i+1}: {feedback}" for i, feedback in enumerate(feedback_storage)])
+        await callback_query.message.reply(f"Все отзывы:\n\n{feedback_list}")
+
+@dp.callback_query(F.data == "send_message_to_all")
+async def send_message_to_all(callback_query: types.CallbackQuery, state: FSMContext):
+    if str(callback_query.from_user.id) != str(ADMIN_ID):
+        await callback_query.answer("У вас нет прав для выполнения этой команды.")
+        return
+    
+    await callback_query.message.reply("Введите сообщение для всех пользователей.")
     await state.set_state(GenerationStates.SEND_MESSAGE_TO_ALL)
 
 @dp.message(GenerationStates.SEND_MESSAGE_TO_ALL)
@@ -386,7 +494,7 @@ async def process_send_message_to_all(message: types.Message, state: FSMContext)
     message_text = message.text.strip()
     for user_id in user_data.keys():
         try:
-            await bot.send_message(user_id, message_text)
+            await bot.send_message(int(user_id), message_text)
         except Exception as e:
             logger.error(f"Не удалось отправить сообщение пользователю {user_id}: {str(e)}")
     await message.reply("Сообщение отправлено всем пользователям.")
@@ -399,7 +507,7 @@ async def finalize_document(message: types.Message, state: FSMContext, status_me
     
     if not results:
         logger.error(f"Ошибка при создании документа для пользователя {message.from_user.id}")
-        await message.reply("Ошибка при создании документа.")
+        await message.reply("Ошибка при создании документа.", reply_markup=get_main_menu_keyboard())
         await state.clear()
         return
     
@@ -453,10 +561,44 @@ async def finalize_document(message: types.Message, state: FSMContext, status_me
     # Отправка документа пользователю
     input_file = FSInputFile(file_path)
     logger.info(f"Отправка документа пользователю {message.from_user.id}")
-    await message.reply_document(input_file, caption=f"Ваш документ на тему '{topic}' готов!")
+    await message.reply_document(input_file, caption=f"Ваш документ на тему '{topic}' готов!", reply_markup=get_main_menu_keyboard())
     
     # Очистка состояния
     await state.clear()
+
+@dp.message(Command("faq"))
+@dp.message(F.text == "FAQ")
+async def faq(message: types.Message):
+    faq_text = (
+        "Часто задаваемые вопросы:\n\n"
+        "1. Как использовать бота?\n"
+        "   Отправьте команду /generate, выберите размер документа и введите тему.\n\n"
+        "2. Сколько запросов я могу сделать в день?\n"
+        "   Обычные пользователи могут сделать 3 запроса в день.\n\n"
+        "3. Как оставить отзыв?\n"
+        "   Используйте команду /leave_feedback или кнопку 'Оставить отзыв'.\n\n"
+        "4. Как связаться с администраторами?\n"
+        "   Используйте команду /contact_admins.\n\n"
+        "5. Как работает реферальная система?\n"
+        "   За каждого приглашенного пользователя вы получаете 2 дополнительных запроса."
+    )
+    await message.reply(faq_text, reply_markup=get_main_menu_keyboard())
+
+@dp.message(Command("about_us"))
+@dp.message(F.text == "О нас")
+async def about_us(message: types.Message):
+    about_text = (
+        "О нашей компании:\n\n"
+        "Мы - команда энтузиастов, разрабатывающая инновационные решения "
+        "для помощи студентам в их академической деятельности. "
+        "Наш бот использует передовые технологии искусственного интеллекта "
+        "для генерации высококачественного контента для дипломных работ.\n\n"
+        "Мы стремимся облегчить процесс написания дипломных работ, "
+        "предоставляя структурированную информацию и идеи для дальнейшего развития. "
+        "Помните, что сгенерированный контент следует использовать как основу "
+        "для вашей собственной работы, дополняя его своими исследованиями и выводами."
+    )
+    await message.reply(about_text)
 
 async def periodic_save():
     while True:
@@ -466,9 +608,17 @@ async def periodic_save():
         logger.info("Данные пользователей и отзывы сохранены")
 
 async def main():
-    logger.info("Бот запущен")
+    # Инициализация бота и диспетчера
+    dp.startup.register(on_startup)
+    
+    # Запуск периодического сохранения
     asyncio.create_task(periodic_save())
+    
+    # Запуск поллинга
     await dp.start_polling(bot)
+
+async def on_startup(dispatcher: Dispatcher):
+    logger.info("Бот запущен")
 
 if __name__ == '__main__':
     asyncio.run(main())
