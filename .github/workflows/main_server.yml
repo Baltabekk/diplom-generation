@@ -1,4 +1,4 @@
-name: Run Main Diploma Generator Server
+Run Main Diploma Generator Server
 
 on:
   push:
@@ -8,23 +8,16 @@ on:
 jobs:
   run-main-server:
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v2
-
     - name: Set up Python
       uses: actions/setup-python@v2
       with:
         python-version: '3.9'
-
     - name: Install dependencies
       run: |
-        python -m venv venv
-        source venv/bin/activate
-        pip install --no-cache-dir -r requirements.txt
-    
-    - name: Verify installed packages
-      run: pip freeze
-
+        python -m pip install --upgrade pip
+        pip install google-generativeai
+        pip install -r requirements.txt
     - name: Run main server
       run: python main.py
