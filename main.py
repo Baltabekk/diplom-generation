@@ -17,7 +17,7 @@ from cachetools import TTLCache
 import random
 import json
 import os
-
+import re
 # Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -454,6 +454,8 @@ async def finalize_document(message: types.Message, state: FSMContext, status_me
 
         for para in paragraphs:
             new_para = doc.add_paragraph()
+            
+            # Убираем символы ** в начале и в конце
             if para.startswith('**') and para.endswith('**'):
                 clean_text = para[2:-2].strip()
                 run = new_para.add_run(clean_text)
@@ -462,6 +464,9 @@ async def finalize_document(message: types.Message, state: FSMContext, status_me
                 parts = para.split('**')
                 for i, part in enumerate(parts):
                     part = part.strip()
+                    # Убираем все символы *
+                    part = part.replace('*', '')
+
                     if i % 2 == 0:
                         if part.startswith('* '):
                             part = '• ' + part[2:].capitalize()
@@ -483,6 +488,7 @@ async def finalize_document(message: types.Message, state: FSMContext, status_me
     )
 
     await state.clear()
+
 
 
 @dp.message(Command("quota"))
